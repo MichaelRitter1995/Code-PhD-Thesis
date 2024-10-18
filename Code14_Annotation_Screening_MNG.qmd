@@ -1,0 +1,529 @@
+---
+title: "SPARK-X Analysis"
+author: "Michael Ritter"
+date-modified: last-modified
+page-layout: full
+theme: cosmo
+format:
+  html:
+    toc: true
+    toc-title: "On this page"
+    toc-expand: true
+    toc-depth: 8
+    embed-resources: true
+    include-in-header:
+      text: <script type="text/javascript" src="./quarto/intense.js"></script> <script type="text/javascript" src="./quarto/datatables.js"></script> <link rel="stylesheet" href="./quarto/datatables.css" />
+    include-after-body: 
+      file: ./quarto/image_zoom.html
+    css: ./quarto/quarto-custom.css
+editor_options: 
+  chunk_output_type: console
+---
+
+#Set up environment
+
+```{r Set up environment, include=FALSE}
+# This is hidden code
+setwd("/omics/odcf/analysis/OE0146_projects/singlecell-and-spatialseq/Micha/visium_Analysis/MNG/SPATA/")
+input_dir="/omics/odcf/analysis/OE0146_projects/singlecell-and-spatialseq/visium/aligned"
+```
+
+#Load libraries
+
+```{r Libraries, message=FALSE, warning=FALSE}
+#library(Seurat)
+library(SPATA2)
+library(ggplot2)
+#install.packages('sf', configure.args = '--with-gdal-config=/software/gdal/3.0.2/bin/gdal-config --with-proj-include=/software/proj/6.2.1/include/ --with-proj-lib=/software/proj/6.2.1/lib', configure.vars = 'GDAL_DATA=/software/gdal/3.0.2/share/gdal')
+library(SPARK)
+library(purrr)
+library(gridExtra)
+library(tidyverse)
+```
+
+#Load samples and evaluate necrotic regions
+
+```{r Load samples and evaluate necrotic regions, message=FALSE, warning=FALSE}
+#Load SPARKX and spata objects
+sample_list <- c("MNG4", "MNG6_A","MNG1","MNG6_IA_2","MNG7","MNG6_B","MNG2_B", "MNG2_B","MNG8","MNG3_A","MNG9_A","MNG10",
+                 "MNG9_B","MNG5")
+
+fin_gene <- data.frame()
+fin_GO <- data.frame()
+
+for(i in 1:length(sample_list)){
+  sample_name <- sample_list[i]
+  spata_obj <- updateSpataObject(readRDS(file = paste0("/omics/odcf/analysis/OE0146_projects/singlecell-and-spatialseq/bhuvic/Necrotic_Meningioma/SPATA/",sample_name,"_spata.rds")))
+  
+  #set distances
+  bcsp_dist <- getCCD(spata_obj, unit = "mm")
+  
+  necr_annot <- names(spata_obj@images[[sample_name]]@annotations)
+  necr_annot <-necr_annot[which(substr(necr_annot, 1,4)=="necr")]
+  
+  if(length(necr_annot)>0){
+    p1 <- plotImageGgplot(object = spata_obj) + 
+      ggpLayerImgAnnOutline(
+        object = spata_obj,
+        line_size = 1, 
+        line_color = "red"
+      )
+    ggsave(p1, file=paste0(sample_name, "_necrotic_regions_overview.pdf"))
+    
+    p2 <- plotImageAnnotations(
+      object = spata_obj,
+      ids = NULL, 
+      tags = NULL, 
+      expand = 1,
+      square = TRUE, 
+      display_subtitle = TRUE, 
+      line_size = 1, 
+      nrow = 4
+    )
+    ggsave(p2, file=paste0(sample_name, "_necrotic_regions_close.pdf"), width = 15, height = 10)
+  }
+}
+
+GO_fin[is.na(GO_fin)] <- 0
+colnames(GO_fin) <-c("GO_term", paste0("deg_", 1:(ncol(GO_temp)-1)))
+
+gene_fin[is.na(gene_fin)] <- 0
+colnames(gene_fin) <-c("gene", paste0("deg_", 1:(ncol(GO_temp)-1)))
+
+```
+
+#Run Trajectory Screening
+
+```{r Initial Annotation Screening and generation of objects, eval=FALSE, message=FALSE, warning=FALSE}
+#Define default path
+path <- "/omics/odcf/analysis/OE0146_projects/singlecell-and-spatialseq/"
+
+#Define samples
+sample_list <- c("MNG4", "MNG6_IA_1", "MNG6_IA_2", "N07_1193", "MNG6_IC", "MNG2C", "MNG3_A","MNG5")
+
+#Not included (brain invasion):
+#"N16_532", "MNG2_B", "N21_2456_I_Border", "N21_2456_I_Infiltration", "N20_2606_IA"
+
+#Validation sample:
+#"MNG1"
+
+#Define models to screen for
+models_of_interest <- c("late_ascending","immediate_descending")
+
+fin_GO=data.frame()
+fin_gene=data.frame()
+
+#cycle through all samples
+for(i in 1:length(sample_list)){
+  sample_name <- sample_list[i]
+  print(sample_name)
+  #load spata object
+  spata_obj <- updateSpataObject(readRDS(file = paste0(path, "bhuvic/Necrotic_Meningioma/SPATA/", 
+                                                       sample_name,"_spata.rds")))
+  #load sparkx object
+  spark_obj <- readRDS(file =paste0(path,"bhuvic/Necrotic_Meningioma/SPARKX/",sample_name,"_sparkx.rds"))
+  
+  #Extract genes from sparkx object
+  spark_df <- spark_obj@res_mtest
+  spark_df <- spark_df[which(spark_df$adjusted_pvalue <= 0.01),c(11,12)]
+  sparkx_genes <- row.names(spark_df)
+  
+  #Get a list of all GO_BP GO sets
+  GO_BP_GS <- getGeneSets(object = spata_obj, of_class = "BP.GO")
+  #If Reactome should also be included
+  #RCTM_GS <- getGeneSets(object = spata_obj, of_class = "RCTM")
+  
+  #Extract the nannotations of the necrotic areas
+  necr_annot <- names(spata_obj@images[[sample_name]]@annotations)
+  necr_annot <-necr_annot[which(substr(necr_annot, 1,4)=="necr")]
+  
+  #set circles for plotting and analysis
+  n_bins_circle <- 10
+  print("Starting GO Analysis")
+  if(length(necr_annot)>0){
+    
+    ####GO Analaysis
+    
+    GO_list <- lapply(necr_annot, function(x){
+      IAS_GO <- 
+        imageAnnotationScreening(
+          object = spata_obj, # the spata object
+          id = x, # the image annotation of interest
+          variables = GO_BP_GS, # the variables/GOs to screen: GO: GO_BP_GS Genes: sparkx_genes
+          n_bins_circle = n_bins_circle, 
+          distance = "2.25mm",
+          model_subset = models_of_interest # the models against which all genes are fitted 
+        )
+      
+      #save RDS
+      saveRDS(IAS_GO, file=paste0("../Image_Annotation_Screening/",sample_name,"_",x,"Image_Annotation_Screening_GO.rds"))
+     
+      #Extract GO terms of interest
+      late_asc_GO <- getResultsVec(object = IAS_GO, model_subset = "late_ascending", 
+                                   threshold_eval = 0.75, threshold_pval= 0.01)
+      late_asc_GO <- data.frame(cbind(late_asc_GO), rep(-1, length(late_asc_GO)))
+      colnames(late_asc_GO) <- c("GO_term", "Score")
+      
+      imm_des_GO <- getResultsVec(object = IAS_GO,model_subset = "immediate_descending", 
+                                  threshold_eval = 0.75,threshold_pval= 0.01)
+      imm_des_GO <- data.frame(cbind(imm_des_GO), rep(1, length(imm_des_GO)))
+      colnames(imm_des_GO) <- c("GO_term", "Score")
+      necr_GO <- rbind(imm_des_GO, late_asc_GO)
+      data.frame(necr_GO)
+    })
+    
+    if(length(GO_list)>1){
+      GO_temp <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, by = "GO_term", all = TRUE),
+                        GO_list)
+    } else if(length(GO_list)==1) {
+      GO_temp <- GO_list[1]
+    }
+    
+    if(nrow(fin_GO)==0){
+      fin_GO <- GO_temp
+    } else {
+      fin_GO <- data.frame(merge(fin_GO, GO_temp, by = "GO_term", all=T))
+      }
+    
+    
+    
+    ### Gene Analysis
+     
+    print("Starting gene Analysis")
+    
+    Gene_list <- lapply(necr_annot, function(x){
+      IAS_genes <- 
+        imageAnnotationScreening(
+          object = spata_obj, # the spata object
+          id = x, 
+          variables = sparkx_genes, # the variables/genes to screen: gene: gene_BP_GS Genes: sparkx_genes
+          n_bins_circle = n_bins_circle, 
+          distance = "1.25mm",
+          model_subset = models_of_interest # the models against which all genes are fitted 
+        )
+      saveRDS(IAS_genes, file=paste0("../Image_Annotation_Screening/",sample_name, "_",x,"Image_Annotation_Screening_Genes.rds"))
+      
+      #Extract gene terms of interest
+      late_asc_gene <- getResultsVec(object = IAS_genes, model_subset = "late_ascending", 
+                                     threshold_eval = 0.75, threshold_pval= 0.01)
+      late_asc_gene <- data.frame(cbind(late_asc_gene), rep(-1, length(late_asc_gene)))
+      colnames(late_asc_gene) <- c("gene", "Score")
+      
+      imm_des_gene <- getResultsVec(object = IAS_genes, model_subset = "immediate_descending", 
+                                    threshold_eval = 0.75, threshold_pval= 0.01)
+      imm_des_gene <- data.frame(cbind(imm_des_gene), rep(1, length(imm_des_gene)))
+      colnames(imm_des_gene) <- c("gene", "Score")
+      fin_gene <- rbind( imm_des_gene, late_asc_gene)
+      data.frame(fin_gene)
+    })
+    
+    if(length(Gene_list)>1){
+      gene_temp <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, by = "gene", all = TRUE),
+                          Gene_list)
+    } else if(length(Gene_list)==1) {
+      gene_temp <- Gene_list[1]
+    }
+    
+    if(nrow(fin_gene)==0){
+      fin_gene <- gene_temp
+    } else{ 
+      fin_gene <- data.frame(merge(fin_gene, gene_temp, by = "gene", all=T))
+    }
+    
+  }
+}
+
+write.csv(fin_GO, file = "Annotation_screening_GO_regions.csv")
+
+fin_GO <- read.csv("Annotation_screening_GO_regions.csv")
+fin_GO <- fin_GO[,2:ncol(fin_GO)]
+fin_GO[is.na(fin_GO)] <- 0
+fin_GO[ ,2:ncol(fin_GO)] <- fin_GO[ ,2:ncol(fin_GO)] %>% mutate_if(is.character, as.numeric)
+fin_GO[,ncol(fin_GO)+1] <- rowSums(abs(fin_GO[,2:ncol(fin_GO)]))
+fin_GO[,ncol(fin_GO)+1] <- rowSums(fin_GO[,2:(ncol(fin_GO)-1)])
+fin_GO[,ncol(fin_GO)+1] <- fin_GO[,ncol(fin_GO)]*fin_GO[,ncol(fin_GO)-1]
+fin_GO[,ncol(fin_GO)+1] <- ifelse(fin_GO[,ncol(fin_GO)-1]>0, "2.immediate.descending", ifelse(fin_GO[,ncol(fin_GO)-1]<0, "0.late_ascending", "1.No_Change"))
+colnames(fin_GO)[(ncol(fin_GO)-3):ncol(fin_GO)] <- c("ndeg","ddeg","idvx", "degvcount")
+
+plot_mv(fin_GO, nstud=(ncol(fin_GO)-1), genecol='GO_term', comb=FALSE, metafc='Mean')
+
+write.csv(fin_gene, file = "Annotation_screening_genes_regions.csv")
+fin_gene <- read.csv(file = "Annotation_screening_genes_regions.csv")
+fin_gene[is.na(fin_gene)] <- 0
+fin_gene <- fin_gene[,2:ncol(fin_gene)]
+fin_gene[ ,2:ncol(fin_gene)] <- fin_gene[ ,2:ncol(fin_gene)] %>% mutate_if(is.character, as.numeric)
+fin_gene[,ncol(fin_gene)+1] <- rowSums(abs(fin_gene[,2:ncol(fin_gene)]))
+fin_gene[,ncol(fin_gene)+1] <- rowSums(fin_gene[,2:(ncol(fin_gene)-1)])
+fin_gene[,ncol(fin_gene)+1] <- fin_gene[,ncol(fin_gene)]*fin_gene[,ncol(fin_gene)-1]
+fin_gene[,ncol(fin_gene)+1] <- ifelse(fin_gene[,ncol(fin_gene)-1]>0, "2.immediate.descending", ifelse(fin_gene[,ncol(fin_gene)-1]<0, "0.late_ascending", "1.No_Change"))
+colnames(fin_gene)[(ncol(fin_gene)-3):ncol(fin_gene)] <- c("ndeg","ddeg","idvx", "degvcount")
+
+plot_mv(fin_gene, nstud=(ncol(fin_gene)-1), genecol='gene', comb=FALSE, metafc='Mean')
+
+#show overview of genes found
+      plotOverview(
+        object = IAS,
+        label_vars = 5, 
+        label_size = 3
+      )
+
+```
+
+
+#Merge samples
+
+
+```{r Merge all necrotic regions of one sample, eval=FALSE, message=FALSE, warning=FALSE}
+#Define default path
+path <- "/omics/odcf/analysis/OE0146_projects/singlecell-and-spatialseq/"
+
+#Define samples
+sample_list <- c("MNG4", "MNG6_IA_1", "MNG6_IA_2", "MNG6_IC", "MNG2C", "MNG3_A","MNG5","MNG2_B")
+
+#Not included (brain invasion):
+#"N16_532", "MNG2_B", "N21_2456_I_Border", "N21_2456_I_Infiltration", "N20_2606_IA"
+
+#Not included (CytAssist):
+#"N07_1193"
+
+#Validation sample:
+#"MNG1"
+
+#Define models to screen for
+models_of_interest <- c("late_ascending","immediate_descending")
+
+fin_sample_GO=data.frame()
+fin_sample_gene=data.frame()
+
+#cycle through all samples
+for(i in 1:length(sample_list)){
+  sample_name <- sample_list[i]
+  print(sample_name)
+  #load spata object
+  spata_obj <- updateSpataObject(readRDS(file = paste0(path, "bhuvic/Necrotic_Meningioma/SPATA/", 
+                                                       sample_name,"_spata.rds")))
+  
+  #Extract the annotations of the necrotic areas
+  necr_annot <- names(spata_obj@images[[sample_name]]@annotations)
+  necr_annot <-necr_annot[which(substr(necr_annot, 1,4)=="necr")]
+  
+  #set circles for plotting and analysis
+  n_bins_circle <- 10
+  print("Starting GO Analysis")
+  if(length(necr_annot)>0){
+    
+    ####GO Analaysis
+    GO_list <- lapply(necr_annot, function(x){
+      #Import differentially expressed GO terms
+      IAS_GO <- readRDS(paste0("../Image_Annotation_Screening/",sample_name,"_",x,"Image_Annotation_Screening_GO.rds"))
+     
+      #Extract GO terms of interest
+      late_asc_GO <- getResultsVec(object = IAS_GO, model_subset = "late_ascending", 
+                                   threshold_eval = 0.75, threshold_pval= 0.01)
+      late_asc_GO <- data.frame(cbind(late_asc_GO), rep(-1, length(late_asc_GO)))
+      colnames(late_asc_GO) <- c("GO_term", "Score")
+      
+      imm_des_GO <- getResultsVec(object = IAS_GO,model_subset = "immediate_descending", 
+                                  threshold_eval = 0.75,threshold_pval= 0.01)
+      imm_des_GO <- data.frame(cbind(imm_des_GO), rep(1, length(imm_des_GO)))
+      colnames(imm_des_GO) <- c("GO_term", "Score")
+      necr_GO <- rbind(imm_des_GO, late_asc_GO)
+      data.frame(necr_GO)
+    })
+
+    #Merge results into one dataframe for each sample
+    if(length(GO_list)>1){
+      GO_temp <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, by = "GO_term", all = TRUE),
+                        GO_list)
+    } else if(length(GO_list)==1) {
+      GO_temp <- GO_list[[1]]
+    }
+    
+    GO_temp[is.na(GO_temp)] <- 0
+
+    #Calculate the mean for each sample
+    if(ncol(GO_temp)>2){
+     Mean <- cbind(GO_temp[,1], round(rowMeans(GO_temp[,2:ncol(GO_temp)])))
+    } else if(length(GO_temp)==2) {
+       Mean <- GO_temp
+    } else {
+      print("something went wrong ....")
+    }
+
+    colnames(Mean) <- c("GO_term", "Mean")
+    
+    #merge all samples into one data.frame
+    if(nrow(fin_sample_GO)==0){
+      fin_sample_GO <- Mean
+    } else {
+      fin_sample_GO <- data.frame(merge(fin_sample_GO, Mean, by = "GO_term", all=T))
+      }
+    
+    
+    
+    ### Gene Analysis
+     
+    print("Starting gene Analysis")
+    
+    Gene_list <- lapply(necr_annot, function(x){
+      IAS_genes <- readRDS(paste0("../Image_Annotation_Screening/",sample_name, "_",x,"Image_Annotation_Screening_Genes.rds"))
+      
+      #Extract gene terms of interest
+      late_asc_gene <- getResultsVec(object = IAS_genes, model_subset = "late_ascending", 
+                                     threshold_eval = 0.75, threshold_pval= 0.01)
+      late_asc_gene <- data.frame(cbind(late_asc_gene), rep(-1, length(late_asc_gene)))
+      colnames(late_asc_gene) <- c("gene", "Score")
+      
+      imm_des_gene <- getResultsVec(object = IAS_genes, model_subset = "immediate_descending", 
+                                    threshold_eval = 0.75, threshold_pval= 0.01)
+      imm_des_gene <- data.frame(cbind(imm_des_gene), rep(1, length(imm_des_gene)))
+      colnames(imm_des_gene) <- c("gene", "Score")
+      fin_gene <- rbind( imm_des_gene, late_asc_gene)
+      data.frame(fin_gene)
+    })
+    
+   if(length(Gene_list)>1){
+      Gene_temp <- Reduce(function(dtf1, dtf2) merge(dtf1, dtf2, by = "gene", all = TRUE),
+                        Gene_list)
+    } else if(length(Gene_list)==1) {
+      Gene_temp <- Gene_list[[1]]
+    }
+    
+    Gene_temp[is.na(Gene_temp)] <- 0
+
+    if(ncol(Gene_temp)>2){
+     Mean <- cbind(Gene_temp[,1], round(rowMeans(Gene_temp[,2:ncol(Gene_temp)])))
+    } else if(length(Gene_temp)==2) {
+       Mean <- Gene_temp
+    } else {
+      print("something went wrong ....")
+    }
+colnames(Mean) <- c("gene", "Mean")
+    
+if(nrow(fin_sample_gene)==0){
+      fin_sample_gene <- Mean
+    } else {
+      fin_sample_gene <- data.frame(merge(fin_sample_gene, Mean, by = "gene", all=T))
+      }
+    
+  }
+}
+
+#store results
+write.csv(fin_sample_GO, file = "Annotation_screening_GO_samples.csv")
+fin_sample_GO <- read.csv(file = "Annotation_screening_GO_samples.csv")
+fin_sample_GO <- fin_sample_GO[,2:ncol(fin_sample_GO)]
+fin_sample_GO[is.na(fin_sample_GO)] <-0
+#Make numeric and repalce na
+fin_sample_GO[is.na(fin_sample_GO)] <- 0
+fin_sample_GO[ ,2:ncol(fin_sample_GO)] <- fin_sample_GO[ ,2:ncol(fin_sample_GO)] %>% mutate_if(is.character, as.numeric)
+#Calculate data for checkboard plot
+fin_sample_GO[,ncol(fin_sample_GO)+1] <- rowSums(abs(fin_sample_GO[,2:ncol(fin_sample_GO)]))
+fin_sample_GO[,ncol(fin_sample_GO)+1] <- rowSums(fin_sample_GO[,2:(ncol(fin_sample_GO)-1)])
+fin_sample_GO[,ncol(fin_sample_GO)+1] <- fin_sample_GO[,ncol(fin_sample_GO)]*fin_sample_GO[,ncol(fin_sample_GO)-1]
+fin_sample_GO[,ncol(fin_sample_GO)+1] <- ifelse(fin_sample_GO[,ncol(fin_sample_GO)-1]>0, "2.immediate.descending", ifelse(fin_sample_GO[,ncol(fin_sample_GO)-1]<0, "0.late_ascending", "1.No_Change"))
+colnames(fin_sample_GO)[(ncol(fin_sample_GO)-3):ncol(fin_sample_GO)] <- c("ndeg","ddeg","idvx", "degvcount")
+
+plot_mv(fin_sample_GO, nstud=(ncol(fin_sample_GO)-1), genecol='GO_term', comb=FALSE, metafc='Mean')
+
+write.csv(fin_sample_gene, file = "Annotation_screening_gene_samples.csv")
+fin_sample_gene <- read.csv(file = "Annotation_screening_gene_samples.csv")
+fin_sample_gene <- fin_sample_gene[,2:ncol(fin_sample_gene)]
+fin_sample_gene[is.na(fin_sample_gene)] <- 0
+fin_sample_gene[ ,2:ncol(fin_sample_gene)] <- fin_sample_gene[ ,2:ncol(fin_sample_gene)] %>% mutate_if(is.character, as.numeric)
+fin_sample_gene[,ncol(fin_sample_gene)+1] <- rowSums(abs(fin_sample_gene[,2:ncol(fin_sample_gene)]))
+fin_sample_gene[,ncol(fin_sample_gene)+1] <- rowSums(fin_sample_gene[,2:(ncol(fin_sample_gene)-1)])
+fin_sample_gene[,ncol(fin_sample_gene)+1] <- fin_sample_gene[,ncol(fin_sample_gene)]*fin_sample_gene[,ncol(fin_sample_gene)-1]
+fin_sample_gene[,ncol(fin_sample_gene)+1] <- ifelse(fin_sample_gene[,ncol(fin_sample_gene)-1]>0, "2.immediate.descending", ifelse(fin_sample_gene[,ncol(fin_sample_gene)-1]<0, "0.late_ascending", "1.No_Change"))
+colnames(fin_sample_gene)[(ncol(fin_sample_gene)-3):ncol(fin_sample_gene)] <- c("ndeg","ddeg","idvx", "degvcount")
+
+plot_mv(fin_sample_gene, nstud=(ncol(fin_sample_gene)-1), genecol='gene', comb=FALSE, metafc='Mean')
+
+#show overview of genes found
+      plotOverview(
+        object = IAS,
+        label_vars = 5, 
+        label_size = 3
+      )
+
+```
+
+#Plot results
+
+```{r}
+#set bins for plotting
+ias_layer_bins <- 
+    ggpLayerEncirclingIAS(
+        object = spata_obj,
+        distance = "2.25mm", 
+        n_bins_circle = 10, 
+        id = "necrosis_1",
+        line_size = 1
+    )
+
+#select sample genes
+example_genes <- 
+  list(
+    imm_desc = c("NFKBIA", "GABRE"),
+    lin_desc = c("SMOX", "GGT5"),
+    lin_asc = c("LYVE1", "IFI27"),
+    late_asc = c("ACSL1", "ACTB")
+    ) 
+
+#plot gene list and mark annotated area
+plotSurfaceComparison(
+  object = spata_obj,
+  color_by = example_genes$imm_desc, 
+  nrow = 1 
+) + 
+  ias_layer_bins + 
+  labs(subtitle = "a) Immediate Descending")
+
+plotSurfaceComparison(
+  object = spata_obj,
+  color_by = example_genes$lin_desc, 
+  nrow = 1 
+) + 
+  ias_layer_bins + 
+  labs(subtitle = "b) Linear Descending")
+
+```
+
+
+```{r}
+#create a line plot for the expresison of the genes in the list
+genes_vec <- flatten_chr(example_genes)
+
+plotIasLineplot(
+  object = spata_obj, 
+  id = "necrosis_1",
+  distance = "2.25mm",
+  n_bins_circle = 20,
+  variables = genes_vec, 
+  include_area = FALSE,
+  line_color = "red",
+  display_border = TRUE,
+  border_linesize = 0.75,
+  border_linetype = "solid" # corresponds to the border of the image annotation
+)
+```
+
+```{r}
+
+#plot expresison and mark annotaiton for different genes
+late_asc_genes <- 
+  getResultsVec(
+    object = IAS,
+    model_subset = "immediate_descending",
+    threshold_eval = 0.75,
+    threshold_pval = 0.05
+  ) %>% 
+  head(20)
+
+plotSurfaceComparison(
+  object = spata_obj,
+  color_by = late_asc_genes,
+  nrow = 5
+) +
+    ias_layer_bins
+```
